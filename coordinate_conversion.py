@@ -333,13 +333,11 @@ if __name__ == '__main__':
     					help='format type of the input file')
     parser.add_argument('-o', '--output', nargs='?', const='output',
 						help='store output to this filename')
-    parser.add_argument('-u', '--units', choices=['angstrom', 'bohr'],
-                        default='angstrom',
-                        help='units of cartesian coordinates')
+    parser.add_argument('--bohr', nargs='?', const=True, default=False,
+                        help='cartesian coordinates given in bohr')
     args = parser.parse_args()
 
 	# Open file and save contents as a string
-    input_string = ''
     with open(args.filename, 'r') as f:
         input_string = f.read()
 
@@ -348,7 +346,11 @@ if __name__ == '__main__':
     if args.format == 'zmat':
         builder = CartesianBuilder(input_string)
     else:
-        builder = ZMATBuilder(input_string, units=args.units)
+        units = 'angstrom'
+        if args.bohr:
+            units = 'bohr'
+        builder = ZMATBuilder(input_string, units=units)
+
     output_string = builder.build_string()
 
     # Output results
