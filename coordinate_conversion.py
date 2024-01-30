@@ -1,6 +1,6 @@
 import sys
-import argparse
 import warnings
+import argparse
 
 import numpy as np
 from numpy import linalg as LA
@@ -18,7 +18,7 @@ from qcelemental.molutil import guess_connectivity
 #   theta: degrees of rotaion about n and n given as [x,y,z]
 #   n: the axis of rotation
 #   degrees: True if theta is in degrees (default: True)
-def build_rmat(theta, n, degrees=True):
+def build_rotation_matrix(theta, n, degrees=True):
     if degrees:
         theta *= np.pi/180    
     c = np.cos(theta)
@@ -38,23 +38,23 @@ def build_rmat(theta, n, degrees=True):
 #   theta: degrees of rotation
 #   n: the axis of rotation
 #   degrees: True if theta is in degrees (default: True)
-def rotate(vector, theta, n, degrees=True):
-    rmat = build_rmat(theta, n, degrees=degrees)
+def rotate_vector(vector, theta, n, degrees=True):
+    rmat = build_rotation_matrix(theta, n, degrees=degrees)
     new_vector = np.dot(rmat, vector)
     return new_vector
 
 # Calculate a new point from zmat specifications
 #   values: list of values for the zmat specifications, i.e. [R, A, D]
-#   positions: list of cartesian coordinates for the indices in the zmat
-def calc_position(values, positions):
+#   geometry: list of cartesian coordinates for the indices in the zmat
+def calculate_position(values, geometry):
     R, A, D = values
-    p1, p2, p3 = positions
+    p1, p2, p3 = geometry
     r_1_2 = p2 - p1                    # bond vector for atoms 1 and 2
     p4 = r_1_2 * R / LA.norm(r_1_2)    # new bond of length R at 0 degrees
     n = np.cross(r_1_2, p3 - p1)       # rotation axis
-    p4 = rotate(p4, A, n)
+    p4 = rotate_vector(p4, A, n)
     n = -r_1_2                         # dihedral rotation axis
-    p4 = rotate(p4, D, n)
+    p4 = rotate_vector(p4, D, n)
     return p4 + p1
 
 # Calculate the distance between 2 points
@@ -87,7 +87,7 @@ def no_bond_found(atom_index, coordinate):
 				  f"atom index {atom_index + 1}. Using nearest atom instead.")
     
 # Find the closest atom which hasn't been used
-def get_nearest_atom(atom_ind, positions, connection_ind):
+def get_nearest_atom(atom_ind, geometry, connection_ind):
     ind = 0        # Placeholder for index of nearest atom
     min_dist = 100 # large initial value
     for i in range(atom_ind):
@@ -95,14 +95,14 @@ def get_nearest_atom(atom_ind, positions, connection_ind):
         if i in connection_ind:
             continue
         # Keep the index with the smallest distance
-        dist = LA.norm(positions[i] - positions[atom_ind])
+        dist = LA.norm(geometry[i] - geometry[atom_ind])
         if dist < min_dist:
             min_dist = dist
             ind = i
             
     return ind
 
-bohr2angstrom = constants.conversion_factor("bohr", "angstrom")
+angstrom2bohr = constants.conversion_factor('angstrom', 'bohr')
 
 
 # ===============================================================
@@ -111,9 +111,8 @@ bohr2angstrom = constants.conversion_factor("bohr", "angstrom")
 
 class CartesianBuilder:
     # get zmat information from string
-    def __init__(self, zmat_str, units='angstrom'):
-        self.s = zmat_str
-        self.atom_list = []   # list of atoms in molecule
+    def __init__(self, zmat_str):
+        self.symbols = []   # list of atoms in molecule
         self.indices = []     # indicies from zmat for connectivity
         self.values = {}      # values for zmat connectivity
         lines = zmat_str.splitlines()
@@ -129,25 +128,25 @@ class CartesianBuilder:
                 self.values[items[0]] = float(items[2])
             # Read in ZMAT specification
             else:
-                self.atom_list.append(items[0])
+                self.symbols.append(items[0])
                 self.indices.append([[int(i) for i in items[1::2]], items[2::2]])    
-        self.natoms = len(self.atom_list)
-        self.units = units
                 
     # Calculate cartesian coordinate output in bohr
-    def calc_cartesian(self):
+    def calculate_cartesian(self):
+        natoms = len(self.symbols)
+
         # First atom on the origin
-        cart = np.zeros((self.natoms, 3))
+        geometry = np.zeros((natoms, 3))
         
         # Second atom on x-axis
         R = self.indices[1][1][0]
         
         # If the ZMAT uses variables, get the value from the dict
         if type(R) == str:
-            cart[1,0] = self.values[R]
+            geometry[1,0] = self.values[R]
         # Otherwise, use the value that's there
         else:
-            cart[1,0] = R
+            geometry[1,0] = R
         
         # Third atom in xy-plane
         R, A = self.indices[2][1]  
@@ -159,79 +158,86 @@ class CartesianBuilder:
             A = self.values[A]
         
         # Rotated vector
-        cart[2,0] = R * np.cos(A * np.pi/180)
-        cart[2,1] = R * np.sin(A * np.pi/180)
+        geometry[2,0] = R * np.cos(A * np.pi/180)
+        geometry[2,1] = R * np.sin(A * np.pi/180)
         
         # If connected to atom 2, subtract from its position
         if self.indices[2][0][0] == 2:
-            cart[2] = cart[1] - cart[2]
+            geometry[2] = geometry[1] - geometry[2]
         
         # Build the rest of the molecule from these coordinates
-        for i in range(3, self.natoms):
-            ind = [idx - 1 for idx in self.indices[i][0]]
-            val = self.indices[i][1]
+        for i in range(3, natoms):
+            ind = [x - 1 for x in self.indices[i][0]]
+            vals = self.indices[i][1]
             for j in range(3):
-                if type(val[j]) == str:
-                    val[j] = self.values[val[j]]
-            cart[i] = calc_position(val, cart[ind])
+                if type(vals[j]) == str:
+                    vals[j] = self.values[vals[j]]
+            geometry[i] = calculate_position(vals, geometry[ind])
             
         # We use QCElemental to orient the molecule
-        mol = Molecule(symbols=self.atom_list, geometry=cart, orient=True)
+        mol = Molecule(symbols=self.symbols, geometry=geometry, orient=True)
         
         return mol.geometry
     
     # output an xyz string
-    def build(self, comment=None):
-        cart = self.calc_cartesian()
+    def build_string(self, comment=None):
+        natoms = len(self.symbols)
+        geometry = self.calculate_cartesian()
         if not comment:
             comment = self.title
-        out = f"{self.natoms}\n{comment}\n"
-        for i in range(self.natoms):
-            out += (f"{self.atom_list[i]:<4}  {cart[i,0]:>14.10f}  "
-					f"{cart[i,1]:>14.10f}  {cart[i,2]:>14.10f}\n")
+        out = f"{natoms}\n{comment}\n"
+        for i in range(natoms):
+            out += (f"{self.symbols[i]:<4}  {geometry[i,0]:>14.10f}  "
+					f"{geometry[i,1]:>14.10f}  {geometry[i,2]:>14.10f}\n")
         return out
 
 class ZMATBuilder:
     # get structure information from string
     def __init__(self, cart_str, units='angstrom'):
-        self.s = cart_str
-        self.title = cart_str.splitlines()[1]
-        self.mol = Molecule.from_data(cart_str) # converts from angstrom to bohr
+        lines = cart_str.splitlines()
+        natoms = int(lines[0])
+        self.symbols = np.zeros(natoms, dtype=object)
+        self.geometry = np.zeros((natoms, 3))
+        self.title = lines[1] # Comment line
+        for i in range(natoms):
+            items = lines[i+2].split()
+            self.symbols[i] = items[0]
+            self.geometry[i] = np.array([float(item) for item in items[1:]])
         self.units = units
                 
     # Build the zmat from cartesian coordinates
     def build_zmat(self):
-        atoms = self.mol.symbols
-        positions = self.mol.geometry
-        connectivity = guess_connectivity(atoms, positions)
+        symbols = self.symbols
+        geometry = self.geometry
         if self.units == 'angstrom':
-            positions *= bohr2angstrom
-        elif self.units == 'bohr':
-            positions /= bohr2angstrom
+            connectivity = guess_connectivity(symbols, geometry * angstrom2bohr)
+        else:
+            connectivity = guess_connectivity(symbols, geometry)
+        print(connectivity)
         variables = {}
         
         # Initialize list for zmat
         # First atom by itself, second atom at distance R1
         zmat = [
-            [atoms[0]], 
-            [atoms[1], 1, 'R1'],
+            [symbols[0]], 
+            [symbols[1], 1, 'R1'],
         ]
-        variables['R1'] = get_distance(positions[0], positions[1])
+        variables['R1'] = get_distance(geometry[0], geometry[1])
         
         # Third atom
         ind = [2, 1]
         # If bonded to atom 1 instead of atom 2, swap indices
         if (0, 2) == connectivity[1]:
-            ind[0] = 1
-            ind[1] = 2
-        zmat.append([atoms[2], ind[0], 'R2', ind[1], 'A1'])
-        variables['R2'] = get_distance(positions[2], positions[ind[0]-1])
-        variables['A1'] = get_angle(positions[2], positions[ind[0]-1], 
-									positions[ind[1]-1])
+            ind = [1, 2]
+        zmat.append([symbols[2], ind[0], 'R2', ind[1], 'A1'])
+        variables['R2'] = get_distance(geometry[2], geometry[ind[0]-1])
+        variables['A1'] = get_angle(geometry[2],
+                                    geometry[ind[0]-1], 
+									geometry[ind[1]-1])
         
         # Fill out the rest of the lines
-        for i in range(3,len(atoms)):
-            ind = np.full(3, -1, dtype=int)
+        for i in range(3,len(symbols)):
+            ind = np.full(3, -1, dtype=int) # placeholders
             
             # Find the index of the first atom its bonded to
             for pair in connectivity:
@@ -242,7 +248,7 @@ class ZMATBuilder:
             
             # If no bond found, get the closest atom
             if ind[0] < 0:
-                ind[0] = get_nearest_atom(i, positions, ind)
+                ind[0] = get_nearest_atom(i, geometry, ind)
                 no_bond_found(i, "distance")
             
             # Get index of the next atom in chain with the lowest index
@@ -257,7 +263,7 @@ class ZMATBuilder:
                         
             # If no bond found, get the closest atom
             if ind[1] < 0:
-                ind[1] = get_nearest_atom(i, positions, ind)
+                ind[1] = get_nearest_atom(i, geometry, ind)
                 no_bond_found(i, "angle")
               
             # Get index for the last atom in the chain with the lowest index
@@ -277,18 +283,21 @@ class ZMATBuilder:
                
             # If no bond found, get the closest atom
             if ind[2] < 0:
-                ind[2] = get_nearest_atom(i, positions, ind)
+                ind[2] = get_nearest_atom(i, geometry, ind)
                 no_bond_found(i, "torsion")
             
             Rlabel, Alabel, Dlabel = f"R{i}", f"A{i-1}", f"D{i-2}"
-            variables[Rlabel] = get_distance(positions[i], positions[ind[0]])
-            variables[Alabel] = get_angle(positions[i], positions[ind[0]], 
-										  positions[ind[1]])
-            variables[Dlabel] = get_dihedral(positions[i], positions[ind[0]], 
-											 positions[ind[1]], 
-											 positions[ind[2]])
+            variables[Rlabel] = get_distance(geometry[i],
+                                             geometry[ind[0]])
+            variables[Alabel] = get_angle(geometry[i],
+                                          geometry[ind[0]],
+										  geometry[ind[1]])
+            variables[Dlabel] = get_dihedral(geometry[i],
+                                             geometry[ind[0]],
+											 geometry[ind[1]],
+											 geometry[ind[2]])
                         
-            zmat.append([atoms[i], ind[0]+1, Rlabel, ind[1]+1, Alabel, 
+            zmat.append([symbols[i], ind[0]+1, Rlabel, ind[1]+1, Alabel, 
 						 ind[2]+1, Dlabel])
             
         # Add in variable assignments
@@ -299,7 +308,7 @@ class ZMATBuilder:
         return zmat
 
     # Build the ZMAT string
-    def build(self, title=None):
+    def build_string(self, title=None):
         if not title:
             title = self.title
         zmat = self.build_zmat()
@@ -321,11 +330,12 @@ if __name__ == '__main__':
     parser.add_argument('filename',
     					help='filename for input file')
     parser.add_argument('format', choices=['zmat', 'xyz'],
-    					help='set the format type of the input file')
+    					help='format type of the input file')
     parser.add_argument('-o', '--output', nargs='?', const='output',
 						help='store output to this filename')
     parser.add_argument('-u', '--units', choices=['angstrom', 'bohr'],
-                        default='angstrom', help='units for coordinates')
+                        default='angstrom',
+                        help='units of cartesian coordinates')
     args = parser.parse_args()
 
 	# Open file and save contents as a string
@@ -336,10 +346,10 @@ if __name__ == '__main__':
     # Build new string from input file
     builder = None
     if args.format == 'zmat':
-        builder = CartesianBuilder(input_string, units=args.units)
+        builder = CartesianBuilder(input_string)
     else:
         builder = ZMATBuilder(input_string, units=args.units)
-    output_string = builder.build()
+    output_string = builder.build_string()
 
     # Output results
     if type(args.output) == str:
@@ -347,5 +357,3 @@ if __name__ == '__main__':
             f.write(output_string)
     else:
         sys.stdout.write(output_string)
-
-
